@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Gesture Data Orb</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#050608;font-family:'Courier New',monospace;color:#3aaaff;}
+  #scene{position:fixed;top:0;left:0;width:100%;height:100%;}
+  #video{position:fixed;bottom:16px;right:16px;width:220px;height:165px;
+    border:1px solid #1a3a4d;border-radius:6px;opacity:0.85;transform:scaleX(-1);z-index:10;}
+  #overlay{position:fixed;bottom:16px;right:16px;width:220px;height:165px;
+    transform:scaleX(-1);z-index:11;pointer-events:none;}
+  #hud{position:fixed;top:16px;left:16px;z-index:10;font-size:12px;line-height:1.6;
+    text-shadow:0 0 6px #3aaaff;pointer-events:none;}
+  #hud .label{color:#5fd0ff;letter-spacing:2px;}
+  #hud .val{color:#fff;}
+  #status{position:fixed;top:16px;right:16px;z-index:10;font-size:11px;letter-spacing:1px;
+    padding:6px 10px;border:1px solid #1a3a4d;border-radius:4px;background:rgba(10,20,30,0.6);}
+  #startBtn{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:20;
+    padding:14px 28px;background:rgba(10,20,30,0.9);border:1px solid #3aaaff;color:#3aaaff;
+    font-family:'Courier New',monospace;font-size:14px;letter-spacing:2px;cursor:pointer;border-radius:4px;}
+  #startBtn:hover{background:#3aaaff;color:#050608;}
+  .ring{border:1px solid rgba(58,170,255,0.3);border-radius:50%;position:fixed;pointer-events:none;z-index:1;}
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="overlay" width="220" height="165"></canvas>
+<div id="hud">
+  <div class="label">GESTURE INTERFACE // ONLINE</div>
+  <div><span class="label">PINCH ZOOM:</span> <span class="val" id="zoomVal">--</span></div>
+  <div><span class="label">SPREAD:</span> <span class="val" id="spreadVal">--</span></div>
+  <div><span class="label">ROTATION:</span> <span class="val" id="rotVal">--</span></div>
+  <div><span class="label">MODE:</span> <span class="val" id="modeVal">IDLE</span></div>
+</div>
+<div id="status">CAMERA: WAITING</div>
+<button id="startBtn">▶ ACTIVATE INTERFACE</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+/* ---------------- THREE.JS SCENE ---------------- */
+const sceneDiv = document.getElementById('scene');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.z = 14;
+
+const renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+sceneDiv.appendChild(renderer.domElement);
+
+const group = new THREE.Group();
+scene.add(group);
+
+// central core
+const coreGeo = new THREE.IcosahedronGeometry(1.2, 2);
+const coreMat = new THREE.MeshBasicMaterial({color:0x3aaaff, wireframe:true, transparent:true, opacity:0.7});
+const core = new THREE.Mesh(coreGeo, coreMat);
+group.add(core);
+
+// node cluster (data points that expand outward)
+const NODE_COUNT = 140;
+const nodes = [];
+const nodeGeo = new THREE.SphereGeometry(0.06, 8, 8);
+const nodeMat = new THREE.MeshBasicMaterial({color:0x5fd0ff});
+const lineMat = new THREE.LineBasicMaterial({color:0x1a5a8a, transparent:true, opacity:0.35});
+
+for(let i=0;i<NODE_COUNT;i++){
+  const phi = Math.acos(-1 + (2*i)/NODE_COUNT);
+  const theta = Math.sqrt(NODE_COUNT*Math.PI)*phi;
+  const dir = new THREE.Vector3(
+    Math.cos(theta)*Math.sin(phi),
+    Math.sin(theta)*Math.sin(phi),
+    Math.cos(phi)
+  );
+  const mesh = new THREE.Mesh(nodeGeo, nodeMat);
+  const restR = 2.2;
+  mesh.position.copy(dir.clone().multiplyScalar(restR));
+  group.add(mesh);
+  nodes.push({mesh, dir, restR, expandR: restR + 3 + Math.random()*3});
+
+  // connecting line back to core
+  const points = [new THREE.Vector3(0,0,0), mesh.position.clone()];
+  const geo = new THREE.BufferGeometry().setFromPoints(points);
+  const line = new THREE.Line(geo, lineMat);
+  group.add(line);
+  nodes[nodes.length-1].line = line;
+}
+
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ---------------- GESTURE STATE ---------------- */
+// smoothed control values
+let targetZoom = 1.0;     // from pinch distance -> scales group / camera distance
+let targetSpread = 0.0;   // 0 = collapsed core, 1 = fully expanded nodes
+let targetRotX = 0, targetRotY = 0;
+let curZoom=1, curSpread=0, curRotX=0, curRotY=0;
+
+function animate(){
+  requestAnimationFrame(animate);
+
+  // smooth (lerp) toward targets so motion feels fluid, not jittery
+  curZoom += (targetZoom - curZoom)*0.12;
+  curSpread += (targetSpread - curSpread)*0.10;
+  curRotX += (targetRotX - curRotX)*0.08;
+  curRotY += (targetRotY - curRotY)*0.08;
+
+  camera.position.z = 14 / curZoom;
+  group.rotation.y = curRotY;
+  group.rotation.x = curRotX;
+  core.rotation.y += 0.003;
+  core.scale.setScalar(1 - curSpread*0.3);
+
+  nodes.forEach(n=>{
+    const r = n.restR + (n.expandR - n.restR)*curSpread;
+    const pos = n.dir.clone().multiplyScalar(r);
+    n.mesh.position.copy(pos);
+    const pts = [new THREE.Vector3(0,0,0), pos];
+    n.line.geometry.setFromPoints(pts);
+    n.mesh.material.opacity = 1;
+  });
+
+  renderer.render(scene, camera);
+}
+animate();
+
+/* ---------------- HAND TRACKING ---------------- */
+const videoEl = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+const statusEl = document.getElementById('status');
+const zoomVal = document.getElementById('zoomVal');
+const spreadVal = document.getElementById('spreadVal');
+const rotVal = document.getElementById('rotVal');
+const modeVal = document.getElementById('modeVal');
+
+function dist(a,b){
+  return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
+}
+
+function onResults(results){
+  octx.save();
+  octx.clearRect(0,0,overlay.width, overlay.height);
+
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+    statusEl.textContent = "CAMERA: TRACKING";
+    const lm = results.multiHandLandmarks[0];
+
+    // draw landmarks on overlay
+    octx.fillStyle = "#3aaaff";
+    lm.forEach(p=>{
+      octx.beginPath();
+      octx.arc(p.x*overlay.width, p.y*overlay.height, 2.5, 0, Math.PI*2);
+      octx.fill();
+    });
+
+    const thumbTip = lm[4], indexTip = lm[8], middleTip=lm[12], ringTip=lm[16], pinkyTip=lm[20];
+    const wrist = lm[0], indexMcp = lm[5];
+
+    // hand scale reference (wrist to index-knuckle) to normalize distances across depth
+    const handScale = dist(wrist, indexMcp) || 0.1;
+
+    // PINCH = thumb-index distance -> ZOOM
+    const pinchDist = dist(thumbTip, indexTip) / handScale;
+    // pinchDist ~ 0.3 (closed) to ~2.0+ (open) empirically
+    const zoomNorm = THREE.MathUtils.clamp((pinchDist - 0.3) / 1.5, 0, 1);
+    targetZoom = 0.6 + zoomNorm * 2.2; // range ~0.6x to 2.8x
+
+    // SPREAD = average fingertip distance from palm center -> EXPAND nodes
+    const fingertips = [indexTip, middleTip, ringTip, pinkyTip];
+    const avgSpread = fingertips.reduce((s,f)=>s+dist(f, wrist),0)/fingertips.length / handScale;
+    const spreadNorm = THREE.MathUtils.clamp((avgSpread - 1.4) / 1.6, 0, 1);
+    targetSpread = spreadNorm;
+
+    // HAND POSITION (x,y in frame) -> ROTATE the orb
+    const cx = wrist.x - 0.5; // -0.5..0.5
+    const cy = wrist.y - 0.5;
+    targetRotY = cx * 3.2;
+    targetRotX = cy * 2.0;
+
+    zoomVal.textContent = targetZoom.toFixed(2)+"x";
+    spreadVal.textContent = (targetSpread*100).toFixed(0)+"%";
+    rotVal.textContent = "X:"+targetRotX.toFixed(2)+" Y:"+targetRotY.toFixed(2);
+    modeVal.textContent = targetSpread > 0.5 ? "EXPANDED / NETWORK" : "CORE VIEW";
+
+  } else {
+    statusEl.textContent = "CAMERA: NO HAND DETECTED";
+    modeVal.textContent = "IDLE";
+  }
+  octx.restore();
+}
+
+const hands = new Hands({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6
+});
+hands.onResults(onResults);
+
+let camUtils = null;
+
+document.getElementById('startBtn').addEventListener('click', async ()=>{
+  document.getElementById('startBtn').style.display='none';
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:320,height:240}});
+    videoEl.srcObject = stream;
+    camUtils = new Camera(videoEl, {
+      onFrame: async ()=>{ await hands.send({image:videoEl}); },
+      width:320, height:240
+    });
+    camUtils.start();
+  }catch(e){
+    statusEl.textContent = "CAMERA ERROR: " + e.message;
+  }
+});
+</script>
+</body>
+</html>
