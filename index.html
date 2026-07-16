@@ -10,29 +10,43 @@
     border:1px solid #1a3a4d;border-radius:6px;opacity:0.85;transform:scaleX(-1);z-index:10;}
   #overlay{position:fixed;bottom:16px;right:16px;width:220px;height:165px;
     transform:scaleX(-1);z-index:11;pointer-events:none;}
-  #hud{position:fixed;top:16px;left:16px;z-index:10;font-size:12px;line-height:1.6;
+  #hud{position:fixed;top:16px;left:16px;z-index:10;font-size:12px;line-height:1.65;
     text-shadow:0 0 6px #3aaaff;pointer-events:none;}
   #hud .label{color:#5fd0ff;letter-spacing:2px;}
   #hud .val{color:#fff;}
+  #hud .divider{margin:6px 0;border-top:1px solid rgba(58,170,255,0.25);width:200px;}
+  #hud .gesture-hint{color:#4a6a80;font-size:10.5px;letter-spacing:1px;}
   #status{position:fixed;top:16px;right:16px;z-index:10;font-size:11px;letter-spacing:1px;
     padding:6px 10px;border:1px solid #1a3a4d;border-radius:4px;background:rgba(10,20,30,0.6);}
   #startBtn{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:20;
     padding:14px 28px;background:rgba(10,20,30,0.9);border:1px solid #3aaaff;color:#3aaaff;
     font-family:'Courier New',monospace;font-size:14px;letter-spacing:2px;cursor:pointer;border-radius:4px;}
   #startBtn:hover{background:#3aaaff;color:#050608;}
-  .ring{border:1px solid rgba(58,170,255,0.3);border-radius:50%;position:fixed;pointer-events:none;z-index:1;}
+  #nodeLabel{position:fixed;z-index:15;pointer-events:none;padding:6px 10px;
+    background:rgba(10,25,35,0.85);border:1px solid #ffb23a;border-radius:4px;
+    font-size:11px;color:#ffcf80;letter-spacing:1px;transform:translate(-50%,-140%);
+    white-space:nowrap;display:none;}
 </style>
 </head>
 <body>
 <div id="scene"></div>
 <video id="video" autoplay playsinline muted></video>
 <canvas id="overlay" width="220" height="165"></canvas>
+<div id="nodeLabel"></div>
 <div id="hud">
   <div class="label">GESTURE INTERFACE // ONLINE</div>
-  <div><span class="label">PINCH ZOOM:</span> <span class="val" id="zoomVal">--</span></div>
-  <div><span class="label">SPREAD:</span> <span class="val" id="spreadVal">--</span></div>
+  <div class="divider"></div>
+  <div><span class="label">ZOOM (hand depth):</span> <span class="val" id="zoomVal">--</span></div>
+  <div><span class="label">NETWORK (fingers open):</span> <span class="val" id="spreadVal">--</span></div>
   <div><span class="label">ROTATION:</span> <span class="val" id="rotVal">--</span></div>
-  <div><span class="label">MODE:</span> <span class="val" id="modeVal">IDLE</span></div>
+  <div><span class="label">GESTURE:</span> <span class="val" id="modeVal">IDLE</span></div>
+  <div><span class="label">TARGET:</span> <span class="val" id="targetVal">none</span></div>
+  <div class="divider"></div>
+  <div class="gesture-hint">MOVE HAND CLOSER/FARTHER &rarr; zoom</div>
+  <div class="gesture-hint">OPEN PALM &rarr; expand network</div>
+  <div class="gesture-hint">MAKE A FIST &rarr; collapse to core</div>
+  <div class="gesture-hint">POINT (index only) &rarr; target a node</div>
+  <div class="gesture-hint">PINCH WHILE TARGETING &rarr; grab node</div>
 </div>
 <div id="status">CAMERA: WAITING</div>
 <button id="startBtn">▶ ACTIVATE INTERFACE</button>
@@ -64,8 +78,10 @@ group.add(core);
 // node cluster (data points that expand outward)
 const NODE_COUNT = 140;
 const nodes = [];
-const nodeGeo = new THREE.SphereGeometry(0.06, 8, 8);
-const nodeMat = new THREE.MeshBasicMaterial({color:0x5fd0ff});
+const nodeGeo = new THREE.SphereGeometry(0.07, 8, 8);
+const NORMAL_COLOR = 0x5fd0ff;
+const TARGET_COLOR = 0xffb23a;
+const GRABBED_COLOR = 0xff5a5a;
 const lineMat = new THREE.LineBasicMaterial({color:0x1a5a8a, transparent:true, opacity:0.35});
 
 for(let i=0;i<NODE_COUNT;i++){
@@ -76,13 +92,19 @@ for(let i=0;i<NODE_COUNT;i++){
     Math.sin(theta)*Math.sin(phi),
     Math.cos(phi)
   );
-  const mesh = new THREE.Mesh(nodeGeo, nodeMat);
+  const mat = new THREE.MeshBasicMaterial({color:NORMAL_COLOR});
+  const mesh = new THREE.Mesh(nodeGeo, mat);
   const restR = 2.2;
   mesh.position.copy(dir.clone().multiplyScalar(restR));
   group.add(mesh);
-  nodes.push({mesh, dir, restR, expandR: restR + 3 + Math.random()*3});
+  nodes.push({
+    id: 'NODE_'+String(i).padStart(3,'0'),
+    value: (Math.random()*900+100).toFixed(1),
+    mesh, dir, restR,
+    expandR: restR + 3 + Math.random()*3,
+    grabbed:false, grabT:0
+  });
 
-  // connecting line back to core
   const points = [new THREE.Vector3(0,0,0), mesh.position.clone()];
   const geo = new THREE.BufferGeometry().setFromPoints(points);
   const line = new THREE.Line(geo, lineMat);
@@ -96,17 +118,37 @@ window.addEventListener('resize', ()=>{
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-/* ---------------- GESTURE STATE ---------------- */
-// smoothed control values
-let targetZoom = 1.0;     // from pinch distance -> scales group / camera distance
-let targetSpread = 0.0;   // 0 = collapsed core, 1 = fully expanded nodes
+/* ---------------- GESTURE-DRIVEN STATE ---------------- */
+let targetZoom = 1.0;
+let targetSpread = 0.0;
 let targetRotX = 0, targetRotY = 0;
 let curZoom=1, curSpread=0, curRotX=0, curRotY=0;
+
+let targetedNode = null;   // node currently under the pointing cursor
+let grabbedNode = null;    // node currently pinched/grabbed
+let pointerNDC = new THREE.Vector2(0,0);
+let pointerActive = false;
+
+const raycaster = new THREE.Raycaster();
+raycaster.params.Points = { threshold: 0.3 };
+const nodeLabel = document.getElementById('nodeLabel');
+
+function findNearestNodeToPointer(){
+  // project each node to screen space, find closest to pointerNDC within a pixel-ish threshold
+  let best = null, bestDist = Infinity;
+  const vec = new THREE.Vector3();
+  nodes.forEach(n=>{
+    vec.copy(n.mesh.position).applyMatrix4(group.matrixWorld);
+    vec.project(camera);
+    const d = Math.hypot(vec.x - pointerNDC.x, vec.y - pointerNDC.y);
+    if(d < bestDist){ bestDist = d; best = n; }
+  });
+  return bestDist < 0.12 ? best : null; // threshold in NDC space (~tight cursor radius)
+}
 
 function animate(){
   requestAnimationFrame(animate);
 
-  // smooth (lerp) toward targets so motion feels fluid, not jittery
   curZoom += (targetZoom - curZoom)*0.12;
   curSpread += (targetSpread - curSpread)*0.10;
   curRotX += (targetRotX - curRotX)*0.08;
@@ -118,14 +160,48 @@ function animate(){
   core.rotation.y += 0.003;
   core.scale.setScalar(1 - curSpread*0.3);
 
+  // live-update which node is targeted (only when pointing, not while grabbing)
+  if(pointerActive && !grabbedNode){
+    const found = findNearestNodeToPointer();
+    if(found !== targetedNode){
+      if(targetedNode) targetedNode.mesh.material.color.setHex(NORMAL_COLOR);
+      targetedNode = found;
+      if(targetedNode) targetedNode.mesh.material.color.setHex(TARGET_COLOR);
+    }
+  } else if(!pointerActive && targetedNode && !grabbedNode){
+    targetedNode.mesh.material.color.setHex(NORMAL_COLOR);
+    targetedNode = null;
+  }
+
   nodes.forEach(n=>{
-    const r = n.restR + (n.expandR - n.restR)*curSpread;
-    const pos = n.dir.clone().multiplyScalar(r);
-    n.mesh.position.copy(pos);
-    const pts = [new THREE.Vector3(0,0,0), pos];
+    if(n === grabbedNode){
+      // pull grabbed node toward the camera side, away from the cluster
+      n.grabT = Math.min(1, n.grabT + 0.08);
+      const pulledPos = n.dir.clone().multiplyScalar(n.restR + 4.5 + n.grabT*2);
+      n.mesh.position.lerp(pulledPos, 0.25);
+    } else {
+      n.grabT = Math.max(0, n.grabT - 0.08);
+      const r = n.restR + (n.expandR - n.restR)*curSpread;
+      const pos = n.dir.clone().multiplyScalar(r);
+      n.mesh.position.lerp(pos, 0.25);
+    }
+    const pts = [new THREE.Vector3(0,0,0), n.mesh.position.clone()];
     n.line.geometry.setFromPoints(pts);
-    n.mesh.material.opacity = 1;
   });
+
+  // position the floating label over the grabbed node
+  if(grabbedNode){
+    const vec = grabbedNode.mesh.position.clone().applyMatrix4(group.matrixWorld);
+    vec.project(camera);
+    const sx = (vec.x*0.5+0.5)*window.innerWidth;
+    const sy = (-vec.y*0.5+0.5)*window.innerHeight;
+    nodeLabel.style.left = sx+'px';
+    nodeLabel.style.top = sy+'px';
+    nodeLabel.style.display = 'block';
+    nodeLabel.textContent = grabbedNode.id + '  //  VAL: ' + grabbedNode.value;
+  } else {
+    nodeLabel.style.display = 'none';
+  }
 
   renderer.render(scene, camera);
 }
@@ -140,10 +216,34 @@ const zoomVal = document.getElementById('zoomVal');
 const spreadVal = document.getElementById('spreadVal');
 const rotVal = document.getElementById('rotVal');
 const modeVal = document.getElementById('modeVal');
+const targetVal = document.getElementById('targetVal');
 
 function dist(a,b){
   return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
 }
+
+// Robust-ish per-finger extension check: a finger is "extended" if its tip
+// sits farther from the wrist than its own pip joint does (with margin).
+function isExtended(lm, mcpIdx, pipIdx, tipIdx, handScale){
+  const wrist = lm[0];
+  const dTip = dist(wrist, lm[tipIdx]);
+  const dPip = dist(wrist, lm[pipIdx]);
+  const dMcp = dist(wrist, lm[mcpIdx]);
+  return (dTip > dPip * 1.08) && (dPip >= dMcp * 0.95);
+}
+function isThumbExtended(lm, handScale){
+  // thumb tip far from the index MCP (palm base) relative to hand scale = extended out to the side
+  const d = dist(lm[4], lm[17]) / handScale; // thumb tip to pinky-mcp, a stable palm reference
+  return d > 1.35;
+}
+
+// Zoom is driven purely by how close the hand is to the camera lens,
+// measured as wrist-to-middle-mcp span relative to the frame (bigger = closer).
+let handScaleSmoothed = null;
+const ZOOM_NEAR = 0.055;   // hand far away
+const ZOOM_FAR  = 0.16;    // hand close to camera
+
+let pinchWasActive = false;
 
 function onResults(results){
   octx.save();
@@ -153,7 +253,6 @@ function onResults(results){
     statusEl.textContent = "CAMERA: TRACKING";
     const lm = results.multiHandLandmarks[0];
 
-    // draw landmarks on overlay
     octx.fillStyle = "#3aaaff";
     lm.forEach(p=>{
       octx.beginPath();
@@ -161,38 +260,72 @@ function onResults(results){
       octx.fill();
     });
 
-    const thumbTip = lm[4], indexTip = lm[8], middleTip=lm[12], ringTip=lm[16], pinkyTip=lm[20];
-    const wrist = lm[0], indexMcp = lm[5];
-
-    // hand scale reference (wrist to index-knuckle) to normalize distances across depth
+    const wrist = lm[0], indexMcp = lm[5], indexTip = lm[8], thumbTip = lm[4];
     const handScale = dist(wrist, indexMcp) || 0.1;
 
-    // PINCH = thumb-index distance -> ZOOM
-    const pinchDist = dist(thumbTip, indexTip) / handScale;
-    // pinchDist ~ 0.3 (closed) to ~2.0+ (open) empirically
-    const zoomNorm = THREE.MathUtils.clamp((pinchDist - 0.3) / 1.5, 0, 1);
-    targetZoom = 0.6 + zoomNorm * 2.2; // range ~0.6x to 2.8x
+    // ---- ZOOM: hand distance from camera (frame-relative hand size), smoothed ----
+    const rawScale = dist(wrist, lm[9]); // wrist to middle-finger MCP, stable across finger poses
+    handScaleSmoothed = handScaleSmoothed===null ? rawScale : handScaleSmoothed*0.85 + rawScale*0.15;
+    const zoomNorm = THREE.MathUtils.clamp((handScaleSmoothed - ZOOM_NEAR)/(ZOOM_FAR-ZOOM_NEAR), 0, 1);
+    targetZoom = 0.6 + zoomNorm * 2.2;
 
-    // SPREAD = average fingertip distance from palm center -> EXPAND nodes
-    const fingertips = [indexTip, middleTip, ringTip, pinkyTip];
-    const avgSpread = fingertips.reduce((s,f)=>s+dist(f, wrist),0)/fingertips.length / handScale;
-    const spreadNorm = THREE.MathUtils.clamp((avgSpread - 1.4) / 1.6, 0, 1);
-    targetSpread = spreadNorm;
+    // ---- FINGER STATES: which fingers are extended ----
+    const idxExt   = isExtended(lm, 5,6,8, handScale);
+    const midExt   = isExtended(lm, 9,10,12, handScale);
+    const ringExt  = isExtended(lm, 13,14,16, handScale);
+    const pinkyExt = isExtended(lm, 17,18,20, handScale);
+    const thumbExt = isThumbExtended(lm, handScale);
+    const extendedCount = [idxExt,midExt,ringExt,pinkyExt,thumbExt].filter(Boolean).length;
 
-    // HAND POSITION (x,y in frame) -> ROTATE the orb
-    const cx = wrist.x - 0.5; // -0.5..0.5
+    // ---- NETWORK EXPAND/COLLAPSE: purely finger-count driven ----
+    targetSpread = extendedCount / 5;
+
+    // ---- ROTATION: hand position in frame, always active ----
+    const cx = wrist.x - 0.5;
     const cy = wrist.y - 0.5;
     targetRotY = cx * 3.2;
     targetRotX = cy * 2.0;
 
+    // ---- POINT gesture: index extended, others curled -> aim cursor ----
+    const isPointing = idxExt && !midExt && !ringExt && !pinkyExt;
+    pointerActive = isPointing || grabbedNode !== null;
+    if(isPointing || grabbedNode){
+      pointerNDC.x = (1 - indexTip.x) * 2 - 1; // mirror to match the selfie-view video
+      pointerNDC.y = -(indexTip.y * 2 - 1);
+    }
+
+    // ---- PINCH gesture: thumb+index close together while pointing -> grab targeted node ----
+    const pinchDist = dist(thumbTip, indexTip) / handScale;
+    const isPinching = pinchDist < 0.55 && idxExt && !midExt && !ringExt;
+
+    if(isPinching && !pinchWasActive && targetedNode && !grabbedNode){
+      grabbedNode = targetedNode;
+    }
+    if(!isPinching && grabbedNode){
+      grabbedNode.mesh.material.color.setHex(NORMAL_COLOR);
+      grabbedNode = null;
+    }
+    if(grabbedNode) grabbedNode.mesh.material.color.setHex(GRABBED_COLOR);
+    pinchWasActive = isPinching;
+
+    // ---- HUD ----
     zoomVal.textContent = targetZoom.toFixed(2)+"x";
-    spreadVal.textContent = (targetSpread*100).toFixed(0)+"%";
+    spreadVal.textContent = extendedCount + "/5 fingers";
     rotVal.textContent = "X:"+targetRotX.toFixed(2)+" Y:"+targetRotY.toFixed(2);
-    modeVal.textContent = targetSpread > 0.5 ? "EXPANDED / NETWORK" : "CORE VIEW";
+    let gestureLabel = "OPEN";
+    if(grabbedNode) gestureLabel = "GRABBING NODE";
+    else if(isPinching) gestureLabel = "PINCH (no target)";
+    else if(isPointing) gestureLabel = "POINTING";
+    else if(extendedCount===0) gestureLabel = "FIST";
+    modeVal.textContent = gestureLabel;
+    targetVal.textContent = grabbedNode ? grabbedNode.id : (targetedNode ? targetedNode.id : "none");
 
   } else {
     statusEl.textContent = "CAMERA: NO HAND DETECTED";
     modeVal.textContent = "IDLE";
+    pointerActive = false;
+    if(grabbedNode){ grabbedNode.mesh.material.color.setHex(NORMAL_COLOR); grabbedNode = null; }
+    pinchWasActive = false;
   }
   octx.restore();
 }
