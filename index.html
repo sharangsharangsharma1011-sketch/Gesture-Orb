@@ -39,15 +39,16 @@
   <div><span class="label">ZOOM:</span> <span class="val" id="zoomVal">--</span></div>
   <div><span class="label">NETWORK:</span> <span class="val" id="spreadVal">--</span></div>
   <div><span class="label">ROTATION:</span> <span class="val" id="rotVal">--</span></div>
-  <div><span class="label">LEFT HAND (control):</span> <span class="val" id="modeVal">--</span></div>
-  <div><span class="label">RIGHT HAND (pointer):</span> <span class="val" id="pointerModeVal">--</span></div>
+  <div><span class="label">RIGHT HAND (zoom):</span> <span class="val" id="modeVal">--</span></div>
+  <div><span class="label">LEFT HAND (rotate/explore):</span> <span class="val" id="pointerModeVal">--</span></div>
   <div><span class="label">TARGET:</span> <span class="val" id="targetVal">none</span></div>
   <div class="divider"></div>
-  <div class="gesture-hint">LEFT FIST &rarr; zoom out + collapse (holds)</div>
-  <div class="gesture-hint">LEFT OPEN PALM &rarr; zoom in + expand (holds)</div>
-  <div class="gesture-hint">RIGHT POINT (index only) &rarr; target a node</div>
-  <div class="gesture-hint">RIGHT PINCH WHILE TARGETING &rarr; grab node</div>
-  <div class="gesture-hint">RIGHT HAND POSITION &rarr; rotate orb</div>
+  <div class="gesture-hint">RIGHT FIST &rarr; zoom out + collapse (holds)</div>
+  <div class="gesture-hint">RIGHT OPEN PALM &rarr; zoom in + expand (holds)</div>
+  <div class="gesture-hint">LEFT OPEN PALM &rarr; rotate orb with hand position</div>
+  <div class="gesture-hint">LEFT FIST &rarr; freeze rotation, explore mode</div>
+  <div class="gesture-hint">  (while frozen) POINT &rarr; target a node</div>
+  <div class="gesture-hint">  (while frozen) PINCH ON TARGET &rarr; grab node</div>
 </div>
 <div id="status">CAMERA: WAITING</div>
 <button id="startBtn">▶ ACTIVATE INTERFACE</button>
@@ -220,12 +221,12 @@ const modeVal = document.getElementById('modeVal');
 const pointerModeVal = document.getElementById('pointerModeVal');
 const targetVal = document.getElementById('targetVal');
 
-// Which physical hand does which job. MediaPipe's handedness label is computed
-// on the raw (non-mirrored) camera frame, so for a selfie-style front camera the
-// label is already flipped to match what you see in the mirrored preview video.
-// If this feels backwards on your camera, just swap these two constants.
-const CONTROL_HAND_LABEL = 'Left';   // fist/palm -> zoom + expand
-const POINTER_HAND_LABEL = 'Right';  // point/pinch -> target + grab, position -> rotate
+// Which physical hand does which job. Flipped based on real-world testing:
+// the label that fires for your actual right hand vs left hand can differ from
+// the MediaPipe default assumption depending on camera/mirroring, so this is
+// tuned to what you observed. If it ever feels backwards again, swap these two.
+const CONTROL_HAND_LABEL = 'Right';  // fist/palm -> zoom + expand (sticky)
+const POINTER_HAND_LABEL = 'Left';   // fist = freeze+explore, palm = rotate
 
 function dist(a,b){
   return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
@@ -246,6 +247,8 @@ function isThumbExtended(lm, handScale){
 }
 
 let pinchWasActive = false;
+let pointerMode = 'ROTATE'; // 'ROTATE' = hand position spins the orb, fingers free
+                             // 'EXPLORE' = rotation frozen, index-point + pinch active
 
 function onResults(results){
   octx.save();
@@ -300,38 +303,61 @@ function onResults(results){
       const idxExt   = isExtended(lm, 5,6,8);
       const midExt   = isExtended(lm, 9,10,12);
       const ringExt  = isExtended(lm, 13,14,16);
+      const pinkyExt = isExtended(lm, 17,18,20);
+      const thumbExt = isThumbExtended(lm, handScale);
+      const extendedCount = [idxExt,midExt,ringExt,pinkyExt,thumbExt].filter(Boolean).length;
 
-      // rotation follows this hand's position in frame
-      const cx = wrist.x - 0.5;
-      const cy = wrist.y - 0.5;
-      targetRotY = cx * 3.2;
-      targetRotX = cy * 2.0;
-
-      const isPointing = idxExt && !midExt && !ringExt;
-      pointerActive = isPointing || grabbedNode !== null;
-      if(isPointing || grabbedNode){
-        pointerNDC.x = (1 - indexTip.x) * 2 - 1; // mirror to match selfie-view video
-        pointerNDC.y = -(indexTip.y * 2 - 1);
+      // MODE TOGGLE: fist -> freeze rotation and switch to explore (point/pinch).
+      // open palm -> unfreeze, hand position drives rotation again.
+      // 2-4 fingers (ambiguous, includes the "point" pose at 1) hold the current mode,
+      // except a lone extended index is deliberately treated as staying in EXPLORE
+      // once you're already there, so pointing itself never kicks you back to rotate.
+      if(extendedCount === 0){
+        pointerMode = 'EXPLORE';
+      } else if(extendedCount >= 4){
+        pointerMode = 'ROTATE';
       }
+      // else: hold whatever pointerMode already was
 
-      const pinchDist = dist(thumbTip, indexTip) / handScale;
-      const isPinching = pinchDist < 0.55 && idxExt && !midExt && !ringExt;
+      if(pointerMode === 'ROTATE'){
+        // hand position spins the orb; pointing/pinching is disabled here
+        const cx = wrist.x - 0.5;
+        const cy = wrist.y - 0.5;
+        targetRotY = cx * 3.2;
+        targetRotX = cy * 2.0;
+        pointerActive = false;
+        if(grabbedNode){ grabbedNode.mesh.material.color.setHex(NORMAL_COLOR); grabbedNode = null; }
+        pinchWasActive = false;
+        pointerModeVal.textContent = "ROTATE (hand moves orb)";
+      } else {
+        // EXPLORE: rotation frozen (we simply don't touch targetRotX/Y), node
+        // targeting and grabbing are active
+        const isPointing = idxExt && !midExt && !ringExt;
+        pointerActive = isPointing || grabbedNode !== null;
+        if(isPointing || grabbedNode){
+          pointerNDC.x = (1 - indexTip.x) * 2 - 1; // mirror to match selfie-view video
+          pointerNDC.y = -(indexTip.y * 2 - 1);
+        }
 
-      if(isPinching && !pinchWasActive && targetedNode && !grabbedNode){
-        grabbedNode = targetedNode;
+        const pinchDist = dist(thumbTip, indexTip) / handScale;
+        const isPinching = pinchDist < 0.55 && idxExt && !midExt && !ringExt;
+
+        if(isPinching && !pinchWasActive && targetedNode && !grabbedNode){
+          grabbedNode = targetedNode;
+        }
+        if(!isPinching && grabbedNode){
+          grabbedNode.mesh.material.color.setHex(NORMAL_COLOR);
+          grabbedNode = null;
+        }
+        if(grabbedNode) grabbedNode.mesh.material.color.setHex(GRABBED_COLOR);
+        pinchWasActive = isPinching;
+
+        let pLabel = "EXPLORE (frozen) - idle";
+        if(grabbedNode) pLabel = "EXPLORE - GRABBING NODE";
+        else if(isPinching) pLabel = "EXPLORE - pinch (no target)";
+        else if(isPointing) pLabel = "EXPLORE - pointing";
+        pointerModeVal.textContent = pLabel;
       }
-      if(!isPinching && grabbedNode){
-        grabbedNode.mesh.material.color.setHex(NORMAL_COLOR);
-        grabbedNode = null;
-      }
-      if(grabbedNode) grabbedNode.mesh.material.color.setHex(GRABBED_COLOR);
-      pinchWasActive = isPinching;
-
-      let pLabel = "idle";
-      if(grabbedNode) pLabel = "GRABBING NODE";
-      else if(isPinching) pLabel = "pinch (no target)";
-      else if(isPointing) pLabel = "pointing";
-      pointerModeVal.textContent = pLabel;
       targetVal.textContent = grabbedNode ? grabbedNode.id : (targetedNode ? targetedNode.id : "none");
     }
   });
