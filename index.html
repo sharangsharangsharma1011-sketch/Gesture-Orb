@@ -37,16 +37,17 @@
   <div class="label">GESTURE INTERFACE // ONLINE</div>
   <div class="divider"></div>
   <div><span class="label">ZOOM:</span> <span class="val" id="zoomVal">--</span></div>
-  <div><span class="label">NETWORK (fingers open):</span> <span class="val" id="spreadVal">--</span></div>
+  <div><span class="label">NETWORK:</span> <span class="val" id="spreadVal">--</span></div>
   <div><span class="label">ROTATION:</span> <span class="val" id="rotVal">--</span></div>
-  <div><span class="label">GESTURE:</span> <span class="val" id="modeVal">IDLE</span></div>
+  <div><span class="label">LEFT HAND (control):</span> <span class="val" id="modeVal">--</span></div>
+  <div><span class="label">RIGHT HAND (pointer):</span> <span class="val" id="pointerModeVal">--</span></div>
   <div><span class="label">TARGET:</span> <span class="val" id="targetVal">none</span></div>
   <div class="divider"></div>
-  <div class="gesture-hint">OPEN PALM &rarr; zoom in + expand (holds)</div>
-  <div class="gesture-hint">MAKE A FIST &rarr; zoom out + collapse (holds)</div>
-  <div class="gesture-hint">POINT (index only) &rarr; target a node</div>
-  <div class="gesture-hint">PINCH WHILE TARGETING &rarr; grab node</div>
-  <div class="gesture-hint">HAND POSITION &rarr; rotate orb</div>
+  <div class="gesture-hint">LEFT FIST &rarr; zoom out + collapse (holds)</div>
+  <div class="gesture-hint">LEFT OPEN PALM &rarr; zoom in + expand (holds)</div>
+  <div class="gesture-hint">RIGHT POINT (index only) &rarr; target a node</div>
+  <div class="gesture-hint">RIGHT PINCH WHILE TARGETING &rarr; grab node</div>
+  <div class="gesture-hint">RIGHT HAND POSITION &rarr; rotate orb</div>
 </div>
 <div id="status">CAMERA: WAITING</div>
 <button id="startBtn">▶ ACTIVATE INTERFACE</button>
@@ -216,7 +217,15 @@ const zoomVal = document.getElementById('zoomVal');
 const spreadVal = document.getElementById('spreadVal');
 const rotVal = document.getElementById('rotVal');
 const modeVal = document.getElementById('modeVal');
+const pointerModeVal = document.getElementById('pointerModeVal');
 const targetVal = document.getElementById('targetVal');
+
+// Which physical hand does which job. MediaPipe's handedness label is computed
+// on the raw (non-mirrored) camera frame, so for a selfie-style front camera the
+// label is already flipped to match what you see in the mirrored preview video.
+// If this feels backwards on your camera, just swap these two constants.
+const CONTROL_HAND_LABEL = 'Left';   // fist/palm -> zoom + expand
+const POINTER_HAND_LABEL = 'Right';  // point/pinch -> target + grab, position -> rotate
 
 function dist(a,b){
   return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
@@ -224,7 +233,7 @@ function dist(a,b){
 
 // Robust-ish per-finger extension check: a finger is "extended" if its tip
 // sits farther from the wrist than its own pip joint does (with margin).
-function isExtended(lm, mcpIdx, pipIdx, tipIdx, handScale){
+function isExtended(lm, mcpIdx, pipIdx, tipIdx){
   const wrist = lm[0];
   const dTip = dist(wrist, lm[tipIdx]);
   const dPip = dist(wrist, lm[pipIdx]);
@@ -232,8 +241,7 @@ function isExtended(lm, mcpIdx, pipIdx, tipIdx, handScale){
   return (dTip > dPip * 1.08) && (dPip >= dMcp * 0.95);
 }
 function isThumbExtended(lm, handScale){
-  // thumb tip far from the index MCP (palm base) relative to hand scale = extended out to the side
-  const d = dist(lm[4], lm[17]) / handScale; // thumb tip to pinky-mcp, a stable palm reference
+  const d = dist(lm[4], lm[17]) / handScale;
   return d > 1.35;
 }
 
@@ -243,89 +251,114 @@ function onResults(results){
   octx.save();
   octx.clearRect(0,0,overlay.width, overlay.height);
 
-  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
-    statusEl.textContent = "CAMERA: TRACKING";
-    const lm = results.multiHandLandmarks[0];
+  const handLandmarks = results.multiHandLandmarks || [];
+  const handedness = results.multiHandedness || [];
 
-    octx.fillStyle = "#3aaaff";
+  let controlHandFound = false;
+  let pointerHandFound = false;
+
+  handLandmarks.forEach((lm, i)=>{
+    const label = handedness[i] ? handedness[i].label : null;
+
+    // draw all detected hands on the small overlay
+    octx.fillStyle = label === CONTROL_HAND_LABEL ? "#ffb23a" : "#3aaaff";
     lm.forEach(p=>{
       octx.beginPath();
       octx.arc(p.x*overlay.width, p.y*overlay.height, 2.5, 0, Math.PI*2);
       octx.fill();
     });
 
-    const wrist = lm[0], indexMcp = lm[5], indexTip = lm[8], thumbTip = lm[4];
+    const wrist = lm[0], indexMcp = lm[5];
     const handScale = dist(wrist, indexMcp) || 0.1;
 
-    // ---- FINGER STATES: which fingers are extended ----
-    const idxExt   = isExtended(lm, 5,6,8, handScale);
-    const midExt   = isExtended(lm, 9,10,12, handScale);
-    const ringExt  = isExtended(lm, 13,14,16, handScale);
-    const pinkyExt = isExtended(lm, 17,18,20, handScale);
-    const thumbExt = isThumbExtended(lm, handScale);
-    const extendedCount = [idxExt,midExt,ringExt,pinkyExt,thumbExt].filter(Boolean).length;
+    if(label === CONTROL_HAND_LABEL){
+      controlHandFound = true;
+      const idxExt   = isExtended(lm, 5,6,8);
+      const midExt   = isExtended(lm, 9,10,12);
+      const ringExt  = isExtended(lm, 13,14,16);
+      const pinkyExt = isExtended(lm, 17,18,20);
+      const thumbExt = isThumbExtended(lm, handScale);
+      const extendedCount = [idxExt,midExt,ringExt,pinkyExt,thumbExt].filter(Boolean).length;
 
-    // ---- ZOOM + NETWORK EXPAND: both driven by the same finger-count axis, and
-    // both HOLD at their last value once the hand leaves frame (no auto snap-back) ----
-    // fist (0 fingers) -> fully zoomed out + collapsed to core
-    // open palm (5 fingers) -> fully zoomed in + expanded network
-    const openNorm = extendedCount / 5;
-    targetSpread = openNorm;
-    targetZoom = 0.6 + openNorm * 2.2;
+      // fist (0) -> zoomed out + collapsed. open palm (5) -> zoomed in + expanded.
+      // both targets simply hold at their current value whenever this hand
+      // isn't showing a clear fist or clear palm (e.g. mid-transition), and
+      // hold forever once the hand leaves the frame (we just stop writing to them).
+      if(extendedCount <= 1){
+        targetSpread = 0; targetZoom = 0.6;
+      } else if(extendedCount >= 4){
+        targetSpread = 1; targetZoom = 2.8;
+      } // else: 2-3 fingers = ambiguous transition, leave targets untouched
 
-    // ---- ROTATION: hand position in frame, always active ----
-    const cx = wrist.x - 0.5;
-    const cy = wrist.y - 0.5;
-    targetRotY = cx * 3.2;
-    targetRotX = cy * 2.0;
-
-    // ---- POINT gesture: index extended, others curled -> aim cursor ----
-    const isPointing = idxExt && !midExt && !ringExt && !pinkyExt;
-    pointerActive = isPointing || grabbedNode !== null;
-    if(isPointing || grabbedNode){
-      pointerNDC.x = (1 - indexTip.x) * 2 - 1; // mirror to match the selfie-view video
-      pointerNDC.y = -(indexTip.y * 2 - 1);
+      modeVal.textContent = extendedCount <= 1 ? "FIST (locked closed)" :
+                             extendedCount >= 4 ? "OPEN PALM (locked open)" : "transitioning...";
     }
 
-    // ---- PINCH gesture: thumb+index close together while pointing -> grab targeted node ----
-    const pinchDist = dist(thumbTip, indexTip) / handScale;
-    const isPinching = pinchDist < 0.55 && idxExt && !midExt && !ringExt;
+    if(label === POINTER_HAND_LABEL){
+      pointerHandFound = true;
+      const indexTip = lm[8], thumbTip = lm[4];
+      const idxExt   = isExtended(lm, 5,6,8);
+      const midExt   = isExtended(lm, 9,10,12);
+      const ringExt  = isExtended(lm, 13,14,16);
 
-    if(isPinching && !pinchWasActive && targetedNode && !grabbedNode){
-      grabbedNode = targetedNode;
+      // rotation follows this hand's position in frame
+      const cx = wrist.x - 0.5;
+      const cy = wrist.y - 0.5;
+      targetRotY = cx * 3.2;
+      targetRotX = cy * 2.0;
+
+      const isPointing = idxExt && !midExt && !ringExt;
+      pointerActive = isPointing || grabbedNode !== null;
+      if(isPointing || grabbedNode){
+        pointerNDC.x = (1 - indexTip.x) * 2 - 1; // mirror to match selfie-view video
+        pointerNDC.y = -(indexTip.y * 2 - 1);
+      }
+
+      const pinchDist = dist(thumbTip, indexTip) / handScale;
+      const isPinching = pinchDist < 0.55 && idxExt && !midExt && !ringExt;
+
+      if(isPinching && !pinchWasActive && targetedNode && !grabbedNode){
+        grabbedNode = targetedNode;
+      }
+      if(!isPinching && grabbedNode){
+        grabbedNode.mesh.material.color.setHex(NORMAL_COLOR);
+        grabbedNode = null;
+      }
+      if(grabbedNode) grabbedNode.mesh.material.color.setHex(GRABBED_COLOR);
+      pinchWasActive = isPinching;
+
+      let pLabel = "idle";
+      if(grabbedNode) pLabel = "GRABBING NODE";
+      else if(isPinching) pLabel = "pinch (no target)";
+      else if(isPointing) pLabel = "pointing";
+      pointerModeVal.textContent = pLabel;
+      targetVal.textContent = grabbedNode ? grabbedNode.id : (targetedNode ? targetedNode.id : "none");
     }
-    if(!isPinching && grabbedNode){
-      grabbedNode.mesh.material.color.setHex(NORMAL_COLOR);
-      grabbedNode = null;
-    }
-    if(grabbedNode) grabbedNode.mesh.material.color.setHex(GRABBED_COLOR);
-    pinchWasActive = isPinching;
+  });
 
-    // ---- HUD ----
-    zoomVal.textContent = targetZoom.toFixed(2)+"x";
-    spreadVal.textContent = extendedCount + "/5 fingers";
-    rotVal.textContent = "X:"+targetRotX.toFixed(2)+" Y:"+targetRotY.toFixed(2);
-    let gestureLabel = "OPEN";
-    if(grabbedNode) gestureLabel = "GRABBING NODE";
-    else if(isPinching) gestureLabel = "PINCH (no target)";
-    else if(isPointing) gestureLabel = "POINTING";
-    else if(extendedCount===0) gestureLabel = "FIST";
-    modeVal.textContent = gestureLabel;
-    targetVal.textContent = grabbedNode ? grabbedNode.id : (targetedNode ? targetedNode.id : "none");
-
+  if(handLandmarks.length > 0){
+    statusEl.textContent = "CAMERA: TRACKING (" + handLandmarks.length + " hand" + (handLandmarks.length>1?"s":"") + ")";
   } else {
     statusEl.textContent = "CAMERA: NO HAND DETECTED";
-    modeVal.textContent = "IDLE";
+  }
+  if(!controlHandFound) modeVal.textContent = "not visible (holding)";
+  if(!pointerHandFound){
+    pointerModeVal.textContent = "not visible";
     pointerActive = false;
     if(grabbedNode){ grabbedNode.mesh.material.color.setHex(NORMAL_COLOR); grabbedNode = null; }
     pinchWasActive = false;
   }
+
+  zoomVal.textContent = targetZoom.toFixed(2)+"x";
+  spreadVal.textContent = (targetSpread*100).toFixed(0)+"%";
+  rotVal.textContent = "X:"+targetRotX.toFixed(2)+" Y:"+targetRotY.toFixed(2);
+
   octx.restore();
 }
 
 const hands = new Hands({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
 hands.setOptions({
-  maxNumHands: 1,
+  maxNumHands: 2,
   modelComplexity: 1,
   minDetectionConfidence: 0.6,
   minTrackingConfidence: 0.6
