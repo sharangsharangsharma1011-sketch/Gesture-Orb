@@ -36,17 +36,17 @@
 <div id="hud">
   <div class="label">GESTURE INTERFACE // ONLINE</div>
   <div class="divider"></div>
-  <div><span class="label">ZOOM (hand depth):</span> <span class="val" id="zoomVal">--</span></div>
+  <div><span class="label">ZOOM:</span> <span class="val" id="zoomVal">--</span></div>
   <div><span class="label">NETWORK (fingers open):</span> <span class="val" id="spreadVal">--</span></div>
   <div><span class="label">ROTATION:</span> <span class="val" id="rotVal">--</span></div>
   <div><span class="label">GESTURE:</span> <span class="val" id="modeVal">IDLE</span></div>
   <div><span class="label">TARGET:</span> <span class="val" id="targetVal">none</span></div>
   <div class="divider"></div>
-  <div class="gesture-hint">MOVE HAND CLOSER/FARTHER &rarr; zoom</div>
-  <div class="gesture-hint">OPEN PALM &rarr; expand network</div>
-  <div class="gesture-hint">MAKE A FIST &rarr; collapse to core</div>
+  <div class="gesture-hint">OPEN PALM &rarr; zoom in + expand (holds)</div>
+  <div class="gesture-hint">MAKE A FIST &rarr; zoom out + collapse (holds)</div>
   <div class="gesture-hint">POINT (index only) &rarr; target a node</div>
   <div class="gesture-hint">PINCH WHILE TARGETING &rarr; grab node</div>
+  <div class="gesture-hint">HAND POSITION &rarr; rotate orb</div>
 </div>
 <div id="status">CAMERA: WAITING</div>
 <button id="startBtn">▶ ACTIVATE INTERFACE</button>
@@ -237,12 +237,6 @@ function isThumbExtended(lm, handScale){
   return d > 1.35;
 }
 
-// Zoom is driven purely by how close the hand is to the camera lens,
-// measured as wrist-to-middle-mcp span relative to the frame (bigger = closer).
-let handScaleSmoothed = null;
-const ZOOM_NEAR = 0.055;   // hand far away
-const ZOOM_FAR  = 0.16;    // hand close to camera
-
 let pinchWasActive = false;
 
 function onResults(results){
@@ -263,12 +257,6 @@ function onResults(results){
     const wrist = lm[0], indexMcp = lm[5], indexTip = lm[8], thumbTip = lm[4];
     const handScale = dist(wrist, indexMcp) || 0.1;
 
-    // ---- ZOOM: hand distance from camera (frame-relative hand size), smoothed ----
-    const rawScale = dist(wrist, lm[9]); // wrist to middle-finger MCP, stable across finger poses
-    handScaleSmoothed = handScaleSmoothed===null ? rawScale : handScaleSmoothed*0.85 + rawScale*0.15;
-    const zoomNorm = THREE.MathUtils.clamp((handScaleSmoothed - ZOOM_NEAR)/(ZOOM_FAR-ZOOM_NEAR), 0, 1);
-    targetZoom = 0.6 + zoomNorm * 2.2;
-
     // ---- FINGER STATES: which fingers are extended ----
     const idxExt   = isExtended(lm, 5,6,8, handScale);
     const midExt   = isExtended(lm, 9,10,12, handScale);
@@ -277,8 +265,13 @@ function onResults(results){
     const thumbExt = isThumbExtended(lm, handScale);
     const extendedCount = [idxExt,midExt,ringExt,pinkyExt,thumbExt].filter(Boolean).length;
 
-    // ---- NETWORK EXPAND/COLLAPSE: purely finger-count driven ----
-    targetSpread = extendedCount / 5;
+    // ---- ZOOM + NETWORK EXPAND: both driven by the same finger-count axis, and
+    // both HOLD at their last value once the hand leaves frame (no auto snap-back) ----
+    // fist (0 fingers) -> fully zoomed out + collapsed to core
+    // open palm (5 fingers) -> fully zoomed in + expanded network
+    const openNorm = extendedCount / 5;
+    targetSpread = openNorm;
+    targetZoom = 0.6 + openNorm * 2.2;
 
     // ---- ROTATION: hand position in frame, always active ----
     const cx = wrist.x - 0.5;
